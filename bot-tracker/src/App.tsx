@@ -27,6 +27,7 @@ type PairRow = {
 }
 
 type StatusFilter = 'all' | PairRow['status']
+type MarketFilter = 'all' | 'btc' | 'eth'
 
 type DailyBlackoutRow = {
   dayKey: string
@@ -84,6 +85,22 @@ const formatSlotLabel = (hour: number, minute: number, durationMinutes: number) 
 
 const isFiveMinuteContract = (slug: string | null) =>
   Boolean(slug && slug.includes('-5m-'))
+
+const detectMarket = (slug: string | null, question: string | null): 'btc' | 'eth' | null => {
+  const slugText = (slug ?? '').toLowerCase()
+  const questionText = (question ?? '').toLowerCase()
+  const combined = `${slugText} ${questionText}`
+
+  if (combined.includes('btc') || combined.includes('bitcoin')) {
+    return 'btc'
+  }
+
+  if (combined.includes('eth') || combined.includes('ethereum')) {
+    return 'eth'
+  }
+
+  return null
+}
 
 const getTimestamp = (value: string | null) => {
   if (!value) {
@@ -258,11 +275,32 @@ const combinePairs = (items: Transaction[]) => {
   }
 }
 
+const getSummaryFromRows = (rows: PairRow[]) => {
+  const completePairs = rows.filter((row) => row.status === 'complete').length
+  const missingCounterSideCount = rows.filter(
+    (row) => row.status === 'missing-counter-side',
+  ).length
+  const extraBugCount = rows.filter((row) => row.status === 'extra-bug').length
+  const extraBugLoss = rows
+    .filter((row) => row.status === 'extra-bug')
+    .reduce((sum, row) => sum + row.combined_buy_price, 0)
+  const totalPnl = rows.reduce((sum, row) => sum + row.estimated_pnl, 0)
+
+  return {
+    completePairs,
+    missingCounterSideCount,
+    extraBugCount,
+    extraBugLoss,
+    totalPnl,
+  }
+}
+
 function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [isLoading, setIsLoading] = useState(hasSupabaseConfig)
   const [error, setError] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [marketFilter, setMarketFilter] = useState<MarketFilter>('all')
   const [blackoutWindow, setBlackoutWindow] = useState<BlackoutWindow>(30)
 
   const fetchTransactions = useCallback(async () => {
@@ -318,22 +356,88 @@ function App() {
 
   const combinedData = useMemo(() => combinePairs(transactions), [transactions])
 
-  const filteredRows = useMemo(() => {
-    if (statusFilter === 'all') {
+  const marketCounts = useMemo(() => {
+    let btc = 0
+    let eth = 0
+
+    for (const row of combinedData.rows) {
+      const market = detectMarket(row.slug, row.question)
+      if (market === 'btc') {
+        btc += 1
+      }
+      if (market === 'eth') {
+        eth += 1
+      }
+    }
+
+    return {
+      all: combinedData.rows.length,
+      btc,
+      eth,
+    }
+  }, [combinedData.rows])
+
+  const marketPnl = useMemo(() => {
+    let btc = 0
+    let eth = 0
+
+    for (const row of combinedData.rows) {
+      const market = detectMarket(row.slug, row.question)
+      if (market === 'btc') {
+        btc += row.estimated_pnl
+      }
+      if (market === 'eth') {
+        eth += row.estimated_pnl
+      }
+    }
+
+    return {
+      btc,
+      eth,
+    }
+  }, [combinedData.rows])
+
+  const marketFilteredRows = useMemo(() => {
+    if (marketFilter === 'all') {
       return combinedData.rows
     }
 
-    return combinedData.rows.filter((row) => row.status === statusFilter)
-  }, [combinedData.rows, statusFilter])
+    return combinedData.rows.filter(
+      (row) => detectMarket(row.slug, row.question) === marketFilter,
+    )
+  }, [combinedData.rows, marketFilter])
+
+  const marketFilteredTransactionsCount = useMemo(() => {
+    if (marketFilter === 'all') {
+      return transactions.length
+    }
+
+    return transactions.filter(
+      (txn) => detectMarket(txn.slug, txn.question) === marketFilter,
+    ).length
+  }, [marketFilter, transactions])
+
+  const selectedSummary = useMemo(
+    () => getSummaryFromRows(marketFilteredRows),
+    [marketFilteredRows],
+  )
+
+  const filteredRows = useMemo(() => {
+    if (statusFilter === 'all') {
+      return marketFilteredRows
+    }
+
+    return marketFilteredRows.filter((row) => row.status === statusFilter)
+  }, [marketFilteredRows, statusFilter])
 
   const filterCounts = useMemo(
     () => ({
-      all: combinedData.rows.length,
-      complete: combinedData.summary.completePairs,
-      'missing-counter-side': combinedData.summary.missingCounterSideCount,
-      'extra-bug': combinedData.summary.extraBugCount,
+      all: marketFilteredRows.length,
+      complete: selectedSummary.completePairs,
+      'missing-counter-side': selectedSummary.missingCounterSideCount,
+      'extra-bug': selectedSummary.extraBugCount,
     }),
-    [combinedData.rows.length, combinedData.summary],
+    [marketFilteredRows.length, selectedSummary],
   )
 
   const statusText = useMemo(() => {
@@ -346,8 +450,9 @@ function App() {
     if (error) {
       return 'Could not load transactions'
     }
-    return `${transactions.length} transactions loaded • ${combinedData.rows.length} combined rows`
-  }, [combinedData.rows.length, error, isLoading, transactions.length])
+    const marketLabel = marketFilter === 'all' ? 'all markets' : marketFilter.toUpperCase()
+    return `${transactions.length} transactions loaded • ${marketFilteredRows.length} combined rows (${marketLabel})`
+  }, [error, isLoading, marketFilter, marketFilteredRows.length, transactions.length])
 
   const blackoutAnalysis = useMemo(() => {
     const windows: BlackoutWindow[] = [30, 60, 120]
@@ -362,7 +467,7 @@ function App() {
         }
       >()
 
-      for (const row of combinedData.rows) {
+      for (const row of marketFilteredRows) {
         if (!row.bought_at || !isFiveMinuteContract(row.slug)) {
           continue
         }
@@ -452,7 +557,7 @@ function App() {
     }
 
     return windows.map(analyzeWindow)
-  }, [combinedData.rows])
+  }, [marketFilteredRows])
 
   const selectedBlackout = useMemo(
     () =>
@@ -511,6 +616,31 @@ function App() {
 
         {error && <div className="alert error">{error}</div>}
 
+        <div className="filters market-filters">
+          <span className="filters-label">Market:</span>
+          <button
+            type="button"
+            className={`filter-btn ${marketFilter === 'all' ? 'active' : ''}`}
+            onClick={() => setMarketFilter('all')}
+          >
+            All ({numberFormatter.format(marketCounts.all)})
+          </button>
+          <button
+            type="button"
+            className={`filter-btn ${marketFilter === 'btc' ? 'active' : ''}`}
+            onClick={() => setMarketFilter('btc')}
+          >
+            BTC ({numberFormatter.format(marketCounts.btc)} / {numberFormatter.format(marketPnl.btc)})
+          </button>
+          <button
+            type="button"
+            className={`filter-btn ${marketFilter === 'eth' ? 'active' : ''}`}
+            onClick={() => setMarketFilter('eth')}
+          >
+            ETH ({numberFormatter.format(marketCounts.eth)} / {numberFormatter.format(marketPnl.eth)})
+          </button>
+        </div>
+
         <div className="summary-wrap">
           <table>
             <thead>
@@ -524,17 +654,17 @@ function App() {
             </thead>
             <tbody>
               <tr>
-                <td>{numberFormatter.format(transactions.length)}</td>
-                <td>{numberFormatter.format(combinedData.summary.completePairs)}</td>
-                <td>{numberFormatter.format(combinedData.summary.missingCounterSideCount)}</td>
+                <td>{numberFormatter.format(marketFilteredTransactionsCount)}</td>
+                <td>{numberFormatter.format(selectedSummary.completePairs)}</td>
+                <td>{numberFormatter.format(selectedSummary.missingCounterSideCount)}</td>
                 <td>
-                  {numberFormatter.format(combinedData.summary.extraBugCount)} /{' '}
+                  {numberFormatter.format(selectedSummary.extraBugCount)} /{' '}
                   <span className="pnl-negative">
-                    -{numberFormatter.format(combinedData.summary.extraBugLoss)}
+                    -{numberFormatter.format(selectedSummary.extraBugLoss)}
                   </span>
                 </td>
-                <td className={combinedData.summary.totalPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
-                  {numberFormatter.format(combinedData.summary.totalPnl)}
+                <td className={selectedSummary.totalPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
+                  {numberFormatter.format(selectedSummary.totalPnl)}
                 </td>
               </tr>
             </tbody>

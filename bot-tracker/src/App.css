@@ -127,6 +127,10 @@ button:disabled {
   background: #111625;
 }
 
+.market-filters {
+  background: #101523;
+}
+
 .filters-label {
   color: #93a0b7;
   font-size: 13px;
