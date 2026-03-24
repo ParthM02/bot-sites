@@ -64,6 +64,16 @@ button:disabled {
   overflow-x: auto;
 }
 
+.summary-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.summary-wrap table {
+  min-width: 620px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -104,6 +114,24 @@ td:nth-child(2) {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.4px;
+}
+
+.pill.complete {
+  background: color-mix(in srgb, #10b981 20%, var(--bg) 80%);
+  color: #34d399;
+}
+
+.pill.incomplete {
+  background: color-mix(in srgb, #ef4444 20%, var(--bg) 80%);
+  color: #f87171;
+}
+
+.pnl-positive {
+  color: #22c55e;
+}
+
+.pnl-negative {
+  color: #ef4444;
 }
 
 .empty {
