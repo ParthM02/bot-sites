@@ -27,7 +27,7 @@ type PairRow = {
 }
 
 type StatusFilter = 'all' | PairRow['status']
-type MarketFilter = 'all' | 'btc' | 'eth'
+type MarketFilter = 'all' | 'btc' | 'eth' | 'xrp' | 'sol' | 'doge'
 
 type DailyBlackoutRow = {
   dayKey: string
@@ -86,7 +86,10 @@ const formatSlotLabel = (hour: number, minute: number, durationMinutes: number) 
 const isFiveMinuteContract = (slug: string | null) =>
   Boolean(slug && slug.includes('-5m-'))
 
-const detectMarket = (slug: string | null, question: string | null): 'btc' | 'eth' | null => {
+const detectMarket = (
+  slug: string | null,
+  question: string | null,
+): 'btc' | 'eth' | 'xrp' | 'sol' | 'doge' | null => {
   const slugText = (slug ?? '').toLowerCase()
   const questionText = (question ?? '').toLowerCase()
   const combined = `${slugText} ${questionText}`
@@ -97,6 +100,18 @@ const detectMarket = (slug: string | null, question: string | null): 'btc' | 'et
 
   if (combined.includes('eth') || combined.includes('ethereum')) {
     return 'eth'
+  }
+
+  if (combined.includes('xrp') || combined.includes('ripple')) {
+    return 'xrp'
+  }
+
+  if (combined.includes('sol') || combined.includes('solana')) {
+    return 'sol'
+  }
+
+  if (combined.includes('doge') || combined.includes('dogecoin')) {
+    return 'doge'
   }
 
   return null
@@ -359,6 +374,9 @@ function App() {
   const marketCounts = useMemo(() => {
     let btc = 0
     let eth = 0
+    let xrp = 0
+    let sol = 0
+    let doge = 0
 
     for (const row of combinedData.rows) {
       const market = detectMarket(row.slug, row.question)
@@ -368,18 +386,33 @@ function App() {
       if (market === 'eth') {
         eth += 1
       }
+      if (market === 'xrp') {
+        xrp += 1
+      }
+      if (market === 'sol') {
+        sol += 1
+      }
+      if (market === 'doge') {
+        doge += 1
+      }
     }
 
     return {
       all: combinedData.rows.length,
       btc,
       eth,
+      xrp,
+      sol,
+      doge,
     }
   }, [combinedData.rows])
 
   const marketPnl = useMemo(() => {
     let btc = 0
     let eth = 0
+    let xrp = 0
+    let sol = 0
+    let doge = 0
 
     for (const row of combinedData.rows) {
       const market = detectMarket(row.slug, row.question)
@@ -389,11 +422,23 @@ function App() {
       if (market === 'eth') {
         eth += row.estimated_pnl
       }
+      if (market === 'xrp') {
+        xrp += row.estimated_pnl
+      }
+      if (market === 'sol') {
+        sol += row.estimated_pnl
+      }
+      if (market === 'doge') {
+        doge += row.estimated_pnl
+      }
     }
 
     return {
       btc,
       eth,
+      xrp,
+      sol,
+      doge,
     }
   }, [combinedData.rows])
 
@@ -638,6 +683,27 @@ function App() {
             onClick={() => setMarketFilter('eth')}
           >
             ETH ({numberFormatter.format(marketCounts.eth)} / {numberFormatter.format(marketPnl.eth)})
+          </button>
+          <button
+            type="button"
+            className={`filter-btn ${marketFilter === 'xrp' ? 'active' : ''}`}
+            onClick={() => setMarketFilter('xrp')}
+          >
+            XRP ({numberFormatter.format(marketCounts.xrp)} / {numberFormatter.format(marketPnl.xrp)})
+          </button>
+          <button
+            type="button"
+            className={`filter-btn ${marketFilter === 'sol' ? 'active' : ''}`}
+            onClick={() => setMarketFilter('sol')}
+          >
+            SOL ({numberFormatter.format(marketCounts.sol)} / {numberFormatter.format(marketPnl.sol)})
+          </button>
+          <button
+            type="button"
+            className={`filter-btn ${marketFilter === 'doge' ? 'active' : ''}`}
+            onClick={() => setMarketFilter('doge')}
+          >
+            DOGE ({numberFormatter.format(marketCounts.doge)} / {numberFormatter.format(marketPnl.doge)})
           </button>
         </div>
 
