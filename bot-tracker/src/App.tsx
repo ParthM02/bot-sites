@@ -28,6 +28,25 @@ type PairRow = {
 
 type StatusFilter = 'all' | PairRow['status']
 
+type DailyBlackoutRow = {
+  dayKey: string
+  dayLabel: string
+  slotLabel: string
+  tradesInSlot: number
+  slotPnl: number
+  avoidableLoss: number
+  dayPnl: number
+  projectedDayPnl: number
+}
+
+type BlackoutWindow = 30 | 60 | 120
+
+type BlackoutWindowResult = {
+  windowMinutes: BlackoutWindow
+  totalAvoidableLoss: number
+  rows: DailyBlackoutRow[]
+}
+
 const numberFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 6,
 })
@@ -39,6 +58,32 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
   hour: '2-digit',
   minute: '2-digit',
 })
+
+const dayFormatter = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric',
+  month: 'short',
+  day: '2-digit',
+})
+
+const getDayKey = (date: Date) => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const formatSlotLabel = (hour: number, minute: number, durationMinutes: number) => {
+  const endMinuteTotal = hour * 60 + minute + durationMinutes
+  const endHour = Math.floor(endMinuteTotal / 60) % 24
+  const endMinute = endMinuteTotal % 60
+
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} - ${String(
+    endHour,
+  ).padStart(2, '0')}:${String(endMinute).padStart(2, '0')}`
+}
+
+const isFiveMinuteContract = (slug: string | null) =>
+  Boolean(slug && slug.includes('-5m-'))
 
 const getTimestamp = (value: string | null) => {
   if (!value) {
@@ -218,6 +263,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(hasSupabaseConfig)
   const [error, setError] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [blackoutWindow, setBlackoutWindow] = useState<BlackoutWindow>(30)
 
   const fetchTransactions = useCallback(async () => {
     if (!supabase) {
@@ -303,6 +349,132 @@ function App() {
     return `${transactions.length} transactions loaded • ${combinedData.rows.length} combined rows`
   }, [combinedData.rows.length, error, isLoading, transactions.length])
 
+  const blackoutAnalysis = useMemo(() => {
+    const windows: BlackoutWindow[] = [30, 60, 120]
+
+    const analyzeWindow = (windowMinutes: BlackoutWindow): BlackoutWindowResult => {
+      const dailyMap = new Map<
+        string,
+        {
+          dayLabel: string
+          dayPnl: number
+          slots: Map<string, { pnl: number; trades: number; hour: number; minute: number }>
+        }
+      >()
+
+      for (const row of combinedData.rows) {
+        if (!row.bought_at || !isFiveMinuteContract(row.slug)) {
+          continue
+        }
+
+        const date = new Date(row.bought_at)
+        if (Number.isNaN(date.getTime())) {
+          continue
+        }
+
+        const dayKey = getDayKey(date)
+        const dayLabel = dayFormatter.format(date)
+        const minuteOfDay = date.getHours() * 60 + date.getMinutes()
+        const bucketMinuteOfDay = Math.floor(minuteOfDay / windowMinutes) * windowMinutes
+        const bucketHour = Math.floor(bucketMinuteOfDay / 60)
+        const bucketMinute = bucketMinuteOfDay % 60
+        const slotKey = `${String(bucketHour).padStart(2, '0')}:${String(bucketMinute).padStart(2, '0')}`
+
+        const dayEntry = dailyMap.get(dayKey)
+        if (!dayEntry) {
+          dailyMap.set(dayKey, {
+            dayLabel,
+            dayPnl: row.estimated_pnl,
+            slots: new Map([
+              [
+                slotKey,
+                {
+                  pnl: row.estimated_pnl,
+                  trades: 1,
+                  hour: bucketHour,
+                  minute: bucketMinute,
+                },
+              ],
+            ]),
+          })
+          continue
+        }
+
+        dayEntry.dayPnl += row.estimated_pnl
+        const slotEntry = dayEntry.slots.get(slotKey)
+
+        if (!slotEntry) {
+          dayEntry.slots.set(slotKey, {
+            pnl: row.estimated_pnl,
+            trades: 1,
+            hour: bucketHour,
+            minute: bucketMinute,
+          })
+        } else {
+          slotEntry.pnl += row.estimated_pnl
+          slotEntry.trades += 1
+        }
+      }
+
+      const rows: DailyBlackoutRow[] = []
+
+      for (const [dayKey, dayEntry] of dailyMap) {
+        const slotValues = [...dayEntry.slots.values()]
+        if (slotValues.length === 0) {
+          continue
+        }
+
+        const worstSlot = slotValues.reduce((worst, current) =>
+          current.pnl < worst.pnl ? current : worst,
+        )
+
+        const avoidableLoss = worstSlot.pnl < 0 ? -worstSlot.pnl : 0
+
+        rows.push({
+          dayKey,
+          dayLabel: dayEntry.dayLabel,
+          slotLabel: formatSlotLabel(worstSlot.hour, worstSlot.minute, windowMinutes),
+          tradesInSlot: worstSlot.trades,
+          slotPnl: worstSlot.pnl,
+          avoidableLoss,
+          dayPnl: dayEntry.dayPnl,
+          projectedDayPnl: dayEntry.dayPnl + avoidableLoss,
+        })
+      }
+
+      rows.sort((a, b) => b.dayKey.localeCompare(a.dayKey))
+
+      return {
+        windowMinutes,
+        rows,
+        totalAvoidableLoss: rows.reduce((sum, row) => sum + row.avoidableLoss, 0),
+      }
+    }
+
+    return windows.map(analyzeWindow)
+  }, [combinedData.rows])
+
+  const selectedBlackout = useMemo(
+    () =>
+      blackoutAnalysis.find((result) => result.windowMinutes === blackoutWindow) ?? {
+        windowMinutes: blackoutWindow,
+        rows: [],
+        totalAvoidableLoss: 0,
+      },
+    [blackoutAnalysis, blackoutWindow],
+  )
+
+  const bestBlackoutWindow = useMemo(
+    () =>
+      blackoutAnalysis.reduce<BlackoutWindowResult | null>((best, current) => {
+        if (!best || current.totalAvoidableLoss > best.totalAvoidableLoss) {
+          return current
+        }
+        return best
+      }, null),
+    [blackoutAnalysis],
+  )
+
   const renderCell = (value: string | number | null, fallback = '—') => {
     if (value === null || value === '') {
       return fallback
@@ -365,6 +537,87 @@ function App() {
                   {numberFormatter.format(combinedData.summary.totalPnl)}
                 </td>
               </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div className="blackout-wrap">
+          <div className="blackout-header">
+            <h2>Daily Blackout Suggestion (5m Contracts)</h2>
+            <p>
+              One blackout slot per day • selected window total avoidable loss:{' '}
+              <span className="pnl-positive">
+                {numberFormatter.format(selectedBlackout.totalAvoidableLoss)}
+              </span>
+            </p>
+            {bestBlackoutWindow && (
+              <p>
+                Auto-best window:{' '}
+                <span className="best-window-pill">{bestBlackoutWindow.windowMinutes}m</span>{' '}
+                • max avoidable loss:{' '}
+                <span className="pnl-positive">
+                  {numberFormatter.format(bestBlackoutWindow.totalAvoidableLoss)}
+                </span>
+              </p>
+            )}
+          </div>
+
+          <div className="blackout-controls">
+            {blackoutAnalysis.map((entry) => (
+              <button
+                key={entry.windowMinutes}
+                type="button"
+                className={`filter-btn ${blackoutWindow === entry.windowMinutes ? 'active' : ''}`}
+                onClick={() => setBlackoutWindow(entry.windowMinutes)}
+              >
+                {entry.windowMinutes}m ({numberFormatter.format(entry.totalAvoidableLoss)})
+                {bestBlackoutWindow?.windowMinutes === entry.windowMinutes && (
+                  <span className="best-chip">Best</span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Day</th>
+                <th>Suggested Blackout Slot</th>
+                <th>Trades In Slot</th>
+                <th>Slot PnL</th>
+                <th>Avoidable Loss</th>
+                <th>Day PnL</th>
+                <th>Projected Day PnL (With Blackout)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!isLoading && selectedBlackout.rows.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="empty">
+                    No 5-minute contract rows available.
+                  </td>
+                </tr>
+              )}
+
+              {selectedBlackout.rows.map((row) => (
+                <tr key={row.dayKey}>
+                  <td>{row.dayLabel}</td>
+                  <td>{row.slotLabel}</td>
+                  <td>{numberFormatter.format(row.tradesInSlot)}</td>
+                  <td className={row.slotPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
+                    {numberFormatter.format(row.slotPnl)}
+                  </td>
+                  <td className={row.avoidableLoss > 0 ? 'pnl-positive' : ''}>
+                    {numberFormatter.format(row.avoidableLoss)}
+                  </td>
+                  <td className={row.dayPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
+                    {numberFormatter.format(row.dayPnl)}
+                  </td>
+                  <td className={row.projectedDayPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
+                    {numberFormatter.format(row.projectedDayPnl)}
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
