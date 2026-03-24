@@ -167,7 +167,8 @@ const combinePairs = (items: Transaction[]) => {
     for (const [index, txn] of leftovers.entries()) {
       const combinedBuyPrice = txn.buy_price ?? 0
       const side = normalizeSide(txn.side)
-      const isMissingCounterSide = index === 0
+      const shouldMarkAsExtraBug = completeCount > 0
+      const isMissingCounterSide = !shouldMarkAsExtraBug && index === 0
 
       pairRows.push({
         rowId: txn.id,
