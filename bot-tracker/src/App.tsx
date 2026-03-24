@@ -21,9 +21,12 @@ type PairRow = {
   total_size: number
   combined_buy_price: number
   estimated_pnl: number
-  is_complete: boolean
+  status: 'complete' | 'missing-counter-side' | 'extra-bug'
+  status_label: string
   sides: string
 }
+
+type StatusFilter = 'all' | PairRow['status']
 
 const numberFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 6,
@@ -90,7 +93,8 @@ const combinePairs = (items: Transaction[]) => {
         total_size: txn.size ?? 0,
         combined_buy_price: combinedBuyPrice,
         estimated_pnl: -combinedBuyPrice,
-        is_complete: false,
+        status: 'extra-bug',
+        status_label: 'Extra Buy (Bug)',
         sides: side ? `${side} only` : 'Unknown side',
       })
       continue
@@ -148,17 +152,22 @@ const combinePairs = (items: Transaction[]) => {
         total_size: (yesTxn.size ?? 0) + (noTxn.size ?? 0),
         combined_buy_price: combinedBuyPrice,
         estimated_pnl: 1 - combinedBuyPrice,
-        is_complete: true,
+        status: 'complete',
+        status_label: 'Complete',
         sides: 'YES + NO',
       })
     }
 
     const leftoverYes = yes.slice(completeCount)
     const leftoverNo = no.slice(completeCount)
+    const leftovers = [...leftoverYes, ...leftoverNo].sort(
+      (a, b) => getTimestamp(a.bought_at) - getTimestamp(b.bought_at),
+    )
 
-    for (const txn of [...leftoverYes, ...leftoverNo]) {
+    for (const [index, txn] of leftovers.entries()) {
       const combinedBuyPrice = txn.buy_price ?? 0
       const side = normalizeSide(txn.side)
+      const isMissingCounterSide = index === 0
 
       pairRows.push({
         rowId: txn.id,
@@ -168,7 +177,10 @@ const combinePairs = (items: Transaction[]) => {
         total_size: txn.size ?? 0,
         combined_buy_price: combinedBuyPrice,
         estimated_pnl: -combinedBuyPrice,
-        is_complete: false,
+        status: isMissingCounterSide ? 'missing-counter-side' : 'extra-bug',
+        status_label: isMissingCounterSide
+          ? 'Missing Counter-side'
+          : 'Extra Buy (Bug)',
         sides: side ? `${side} only` : 'Unknown side',
       })
     }
@@ -178,15 +190,23 @@ const combinePairs = (items: Transaction[]) => {
     (a, b) => getTimestamp(b.bought_at) - getTimestamp(a.bought_at),
   )
 
-  const completePairs = rows.filter((row) => row.is_complete).length
-  const incompletes = rows.length - completePairs
+  const completePairs = rows.filter((row) => row.status === 'complete').length
+  const missingCounterSideCount = rows.filter(
+    (row) => row.status === 'missing-counter-side',
+  ).length
+  const extraBugCount = rows.filter((row) => row.status === 'extra-bug').length
+  const extraBugLoss = rows
+    .filter((row) => row.status === 'extra-bug')
+    .reduce((sum, row) => sum + row.combined_buy_price, 0)
   const totalPnl = rows.reduce((sum, row) => sum + row.estimated_pnl, 0)
 
   return {
     rows,
     summary: {
       completePairs,
-      incompletes,
+      missingCounterSideCount,
+      extraBugCount,
+      extraBugLoss,
       totalPnl,
     },
   }
@@ -196,6 +216,7 @@ function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [isLoading, setIsLoading] = useState(hasSupabaseConfig)
   const [error, setError] = useState<string | null>(null)
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
 
   const fetchTransactions = useCallback(async () => {
     if (!supabase) {
@@ -249,6 +270,24 @@ function App() {
   }, [fetchTransactions])
 
   const combinedData = useMemo(() => combinePairs(transactions), [transactions])
+
+  const filteredRows = useMemo(() => {
+    if (statusFilter === 'all') {
+      return combinedData.rows
+    }
+
+    return combinedData.rows.filter((row) => row.status === statusFilter)
+  }, [combinedData.rows, statusFilter])
+
+  const filterCounts = useMemo(
+    () => ({
+      all: combinedData.rows.length,
+      complete: combinedData.summary.completePairs,
+      'missing-counter-side': combinedData.summary.missingCounterSideCount,
+      'extra-bug': combinedData.summary.extraBugCount,
+    }),
+    [combinedData.rows.length, combinedData.summary],
+  )
 
   const statusText = useMemo(() => {
     if (!hasSupabaseConfig) {
@@ -305,7 +344,8 @@ function App() {
               <tr>
                 <th>Total Transactions</th>
                 <th>Complete Pairs</th>
-                <th>Incompletes</th>
+                <th>Missing Counter-side</th>
+                <th>Extra Buys (Bug / Loss)</th>
                 <th>Total PnL</th>
               </tr>
             </thead>
@@ -313,13 +353,51 @@ function App() {
               <tr>
                 <td>{numberFormatter.format(transactions.length)}</td>
                 <td>{numberFormatter.format(combinedData.summary.completePairs)}</td>
-                <td>{numberFormatter.format(combinedData.summary.incompletes)}</td>
+                <td>{numberFormatter.format(combinedData.summary.missingCounterSideCount)}</td>
+                <td>
+                  {numberFormatter.format(combinedData.summary.extraBugCount)} /{' '}
+                  <span className="pnl-negative">
+                    -{numberFormatter.format(combinedData.summary.extraBugLoss)}
+                  </span>
+                </td>
                 <td className={combinedData.summary.totalPnl >= 0 ? 'pnl-positive' : 'pnl-negative'}>
                   {numberFormatter.format(combinedData.summary.totalPnl)}
                 </td>
               </tr>
             </tbody>
           </table>
+        </div>
+
+        <div className="filters">
+          <span className="filters-label">Filter rows:</span>
+          <button
+            type="button"
+            className={`filter-btn ${statusFilter === 'all' ? 'active' : ''}`}
+            onClick={() => setStatusFilter('all')}
+          >
+            All ({numberFormatter.format(filterCounts.all)})
+          </button>
+          <button
+            type="button"
+            className={`filter-btn ${statusFilter === 'complete' ? 'active' : ''}`}
+            onClick={() => setStatusFilter('complete')}
+          >
+            Complete ({numberFormatter.format(filterCounts.complete)})
+          </button>
+          <button
+            type="button"
+            className={`filter-btn ${statusFilter === 'missing-counter-side' ? 'active' : ''}`}
+            onClick={() => setStatusFilter('missing-counter-side')}
+          >
+            Missing ({numberFormatter.format(filterCounts['missing-counter-side'])})
+          </button>
+          <button
+            type="button"
+            className={`filter-btn ${statusFilter === 'extra-bug' ? 'active' : ''}`}
+            onClick={() => setStatusFilter('extra-bug')}
+          >
+            Extra Bug ({numberFormatter.format(filterCounts['extra-bug'])})
+          </button>
         </div>
 
         <div className="table-wrap">
@@ -337,7 +415,7 @@ function App() {
               </tr>
             </thead>
             <tbody>
-              {!isLoading && combinedData.rows.length === 0 && (
+              {!isLoading && filteredRows.length === 0 && (
                 <tr>
                   <td colSpan={8} className="empty">
                     No transactions found.
@@ -345,7 +423,7 @@ function App() {
                 </tr>
               )}
 
-              {combinedData.rows.map((row) => {
+              {filteredRows.map((row) => {
                 const boughtAt = row.bought_at
                   ? dateFormatter.format(new Date(row.bought_at))
                   : '—'
@@ -368,8 +446,8 @@ function App() {
                       </span>
                     </td>
                     <td>
-                      <span className={`pill ${row.is_complete ? 'complete' : 'incomplete'}`}>
-                        {row.is_complete ? 'Complete' : 'Incomplete'}
+                      <span className={`pill ${row.status}`}>
+                        {row.status_label}
                       </span>
                     </td>
                   </tr>
